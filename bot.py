@@ -96,7 +96,7 @@ def build_message(matches: list[dict]) -> str:
     if not a_venir:
         return f"⚽ **Coupe du Monde 2026 — {date_str}**\n\nTous les matchs du jour sont terminés. ✅"
 
-    lines = [f"⚽ **Coupe du Monde 2026 — {date_str}**\n"]
+    lines = [f"<@&1515376252414853211>\n⚽ **Coupe du Monde 2026 — {date_str}**\n"]
     for m in a_venir:
         lines.append(f"🕐 **{m['dt'].strftime('%Hh%M')}** — {m['match']}")
     lines.append(f"\n_Horaires en heure française · {len(a_venir)} match(s) à venir_")
