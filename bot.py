@@ -13,7 +13,7 @@ POST_HOUR      = int(os.environ.get("POST_HOUR", "6"))
 POST_MINUTE    = int(os.environ.get("POST_MINUTE", "0"))
 ROLE_ID        = 1515376252414853211
 PARIS          = timezone(timedelta(hours=2))
-CDM_TOURNAMENT = 16  # FIFA World Cup uniqueTournament.id sur Sofascore
+CDM_TOURNAMENT = 16
 RAPIDAPI_HOST  = "sofascore.p.rapidapi.com"
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -25,14 +25,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Mémoire pour éviter les doublons
-rappels_envoyes   = set()
-incidents_envoyes = set()  # "matchId_incidentId"
+rappels_envoyes = set()
+scores_precedents = {}  # {match_id: (home_score, away_score)}
+fins_envoyes = set()
 
 
-# ─── HELPERS ICS ──────────────────────────────────────────────────────────────
+# ─── ICS ──────────────────────────────────────────────────────────────────────
 
-def parse_dt(s: str) -> datetime:
+def parse_dt(s):
     dt = datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]),
                   int(s[9:11]), int(s[11:13]), int(s[13:15]),
                   tzinfo=timezone.utc)
@@ -80,16 +80,12 @@ def get_all_matches_ics():
 def get_matches_journee():
     now = datetime.now(PARIS)
     debut, fin = get_journee_cdm()
-    return [
-        {**m, "passe": m["dt"] < now}
-        for m in get_all_matches_ics()
-        if debut <= m["dt"] <= fin
-    ]
+    return [{**m, "passe": m["dt"] < now} for m in get_all_matches_ics() if debut <= m["dt"] <= fin]
 
 
-# ─── HELPERS SOFASCORE API ────────────────────────────────────────────────────
+# ─── SOFASCORE ────────────────────────────────────────────────────────────────
 
-def sofascore_get(endpoint: str, params: dict = {}) -> dict:
+def sofascore_get(endpoint, params={}):
     url = f"https://{RAPIDAPI_HOST}/{endpoint}"
     headers = {
         "x-rapidapi-host": RAPIDAPI_HOST,
@@ -101,21 +97,29 @@ def sofascore_get(endpoint: str, params: dict = {}) -> dict:
     return resp.json()
 
 
-def get_live_cdm_matches() -> list[dict]:
-    """Retourne les matchs CDM actuellement en live."""
+def get_live_cdm_matches():
     data = sofascore_get("categories/list-live", {"categoryId": 1468})
-    # On récupère les events live de la catégorie World (1468)
-    # Puis on filtre par uniqueTournament.id == CDM_TOURNAMENT
-    events = data.get("events", [])
     return [
-        e for e in events
+        e for e in data.get("events", [])
         if e.get("tournament", {}).get("uniqueTournament", {}).get("id") == CDM_TOURNAMENT
     ]
 
 
-def get_match_incidents(match_id: int) -> list[dict]:
-    data = sofascore_get("matches/get-incidents", {"matchId": match_id})
-    return data.get("incidents", [])
+def get_minute(match):
+    """Calcule la minute approximative du match."""
+    status = match.get("status", {}).get("description", "")
+    time_data = match.get("time", {})
+    status_time = match.get("statusTime", {})
+
+    if "half" in match.get("status", {}).get("type", ""):
+        initial = status_time.get("initial", 0)
+        start_ts = status_time.get("timestamp", 0)
+        extra = status_time.get("extra", 0)
+        if start_ts:
+            elapsed = int((datetime.now(timezone.utc).timestamp() - start_ts) + initial)
+            minute = min(elapsed // 60, (initial + extra) // 60)
+            return f"{minute}'"
+    return status
 
 
 # ─── EMBEDS ───────────────────────────────────────────────────────────────────
@@ -146,50 +150,40 @@ def build_embed_rappel(match):
     return f"<@&{ROLE_ID}>", embed
 
 
-def build_embed_but(home: str, away: str, home_score: int, away_score: int,
-                    minute: int, scorer: str, team: str) -> discord.Embed:
+def build_embed_but(home, away, hs, as_, minute):
     embed = discord.Embed(
         title="⚽ BUT !",
-        description=(
-            f"**{home} {home_score} - {away_score} {away}**\n\n"
-            f"⚽ **{scorer}** ({team}) — {minute}'"
-        ),
+        description=f"**{home} {hs} - {as_} {away}**\n\n🕐 {minute}",
         color=0xF1C40F
     )
     return embed
 
 
-def build_embed_carton(home: str, away: str, minute: int,
-                        joueur: str, team: str, couleur: str) -> discord.Embed:
+def build_embed_carton(home, away, joueur, team, couleur, minute):
     if couleur == "yellow":
         emoji, titre, color = "🟨", "Carton Jaune", 0xF1C40F
     elif couleur == "yellowRed":
         emoji, titre, color = "🟨🟥", "Double Carton Jaune", 0xFF6B00
     else:
         emoji, titre, color = "🟥", "Carton Rouge", 0xE74C3C
-
     embed = discord.Embed(
         title=f"{emoji} {titre} !",
-        description=(
-            f"**{home} - {away}**\n\n"
-            f"{emoji} **{joueur}** ({team}) — {minute}'"
-        ),
+        description=f"**{home} - {away}**\n\n{emoji} **{joueur}** ({team}) — {minute}",
         color=color
     )
     return embed
 
 
-def build_embed_fin(home: str, away: str, home_score: int, away_score: int) -> discord.Embed:
-    if home_score > away_score:
+def build_embed_fin(home, away, hs, as_):
+    if hs > as_:
         result = f"🏆 **{home}** remporte le match !"
-    elif away_score > home_score:
+    elif as_ > hs:
         result = f"🏆 **{away}** remporte le match !"
     else:
         result = "🤝 Match nul !"
-
     embed = discord.Embed(
         title="🔚 Fin du match !",
-        description=f"**{home} {home_score} - {away_score} {away}**\n\n{result}",
+        description=f"**{home} {hs} - {as_} {away}**\n\n{result}",
         color=0x95A5A6
     )
     return embed
@@ -236,65 +230,48 @@ async def check_rappels():
         await asyncio.sleep(60)
 
 
-async def check_live_incidents():
-    """Vérifie toutes les 60s les buts et cartons des matchs CDM en live."""
+async def check_live_scores():
+    """Détecte les buts via changement de score + cartons via incidents si dispo."""
     await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
-    fins_envoyes = set()
 
     while not client.is_closed():
         try:
             live_matches = get_live_cdm_matches()
             for match in live_matches:
-                mid        = match["id"]
-                home       = match["homeTeam"]["name"]
-                away       = match["awayTeam"]["name"]
-                home_score = match["homeScore"].get("current", 0)
-                away_score = match["awayScore"].get("current", 0)
-                status     = match["status"]["type"]
+                mid  = match["id"]
+                home = match["homeTeam"]["name"]
+                away = match["awayTeam"]["name"]
+                hs   = match["homeScore"].get("current", 0)
+                as_  = match["awayScore"].get("current", 0)
+                status = match["status"]["type"]
+                minute = get_minute(match)
 
                 # Fin de match
                 if status == "finished" and mid not in fins_envoyes:
-                    embed = build_embed_fin(home, away, home_score, away_score)
+                    embed = build_embed_fin(home, away, hs, as_)
                     await channel.send(embed=embed)
                     fins_envoyes.add(mid)
-                    print(f"[BOT] 🔚 Fin : {home} {home_score}-{away_score} {away}")
+                    scores_precedents.pop(mid, None)
+                    print(f"[BOT] 🔚 Fin : {home} {hs}-{as_} {away}")
                     continue
 
                 if status != "inprogress":
                     continue
 
-                # Incidents (buts, cartons)
-                incidents = get_match_incidents(mid)
-                for inc in incidents:
-                    inc_id  = inc.get("id", 0)
-                    key     = f"{mid}_{inc_id}"
-                    if key in incidents_envoyes:
-                        continue
+                # Détection but par changement de score
+                prev = scores_precedents.get(mid)
+                if prev is None:
+                    scores_precedents[mid] = (hs, as_)
+                    continue
 
-                    inc_type = inc.get("incidentType", "")
-                    minute   = inc.get("time", 0)
-                    add_time = inc.get("addedTime", 0)
-                    min_str  = f"{minute}+{add_time}'" if add_time else f"{minute}'"
+                prev_hs, prev_as = prev
+                if hs > prev_hs or as_ > prev_as:
+                    embed = build_embed_but(home, away, hs, as_, minute)
+                    await channel.send(embed=embed)
+                    print(f"[BOT] ⚽ But détecté : {home} {hs}-{as_} {away} {minute}")
 
-                    if inc_type == "goal":
-                        scorer   = inc.get("player", {}).get("name", "Inconnu")
-                        inc_team = home if inc.get("isHome") else away
-                        embed    = build_embed_but(home, away, home_score, away_score,
-                                                   min_str, scorer, inc_team)
-                        await channel.send(embed=embed)
-                        incidents_envoyes.add(key)
-                        print(f"[BOT] ⚽ But : {scorer} ({inc_team}) {min_str}")
-
-                    elif inc_type == "card":
-                        joueur   = inc.get("player", {}).get("name", "Inconnu")
-                        inc_team = home if inc.get("isHome") else away
-                        couleur  = inc.get("incidentClass", "yellow")
-                        embed    = build_embed_carton(home, away, min_str,
-                                                      joueur, inc_team, couleur)
-                        await channel.send(embed=embed)
-                        incidents_envoyes.add(key)
-                        print(f"[BOT] 🟨 Carton : {joueur} ({inc_team}) {min_str}")
+                scores_precedents[mid] = (hs, as_)
 
         except Exception as e:
             print(f"[BOT] ❌ Erreur live : {e}")
@@ -307,7 +284,7 @@ async def on_ready():
     print(f"[BOT] Connecté : {client.user}")
     client.loop.create_task(post_daily_matches())
     client.loop.create_task(check_rappels())
-    client.loop.create_task(check_live_incidents())
+    client.loop.create_task(check_live_scores())
 
 
 @client.event
