@@ -98,7 +98,8 @@ def sofascore_get(endpoint, params={}):
 
 
 def get_live_cdm_matches():
-    data = sofascore_get("categories/list-live", {"categoryId": 1468})
+    # Récupère les matchs live de la catégorie World (1468)
+    data = sofascore_get("tournaments/get-live-events", {"categoryId": 1468})
     return [
         e for e in data.get("events", [])
         if e.get("tournament", {}).get("uniqueTournament", {}).get("id") == CDM_TOURNAMENT
